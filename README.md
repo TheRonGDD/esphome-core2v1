@@ -41,7 +41,7 @@ This is a **generic template** for anyone who wants to:
 
 ### 1. Clone This Repository
 ```bash
-git clone https://github.com/yourusername/esphome-core2v1.git
+git clone https://github.com/TheRonGDD/esphome-core2v1.git
 cd esphome-core2v1
 ```
 
