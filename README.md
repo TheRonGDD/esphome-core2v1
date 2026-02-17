@@ -9,7 +9,6 @@ This is a **generic template** for anyone who wants to:
 - Build a custom touchscreen interface with multiple pages
 - Control lights, fans, switches, and other Home Assistant entities
 - Access all device capabilities (IMU, battery, WiFi, backlight, vibration, audio, microphone)
-- Have a clean starting point without alarm clock or game logic
 
 ## ✨ Features
 
@@ -27,7 +26,6 @@ This is a **generic template** for anyone who wants to:
 
 - **Commented Examples** — Every optional feature includes working examples
 - **Production-Ready** — Safety features enforce backlight minimum to keep touch responsive
-- **Clean Codebase** — No alarm clocks, games, or device-specific logic
 
 ## 📋 Requirements
 
@@ -207,30 +205,6 @@ esphome/
 └── fonts/
     └── materialdesignicons-webfont.ttf  # Icon font
 ```
-
-## 🆚 What's Different from Original
-
-**Removed:**
-- ❌ Alarm clock logic
-- ❌ Math game for dismissing alarms
-- ❌ Device-specific references (girls room lights, fans)
-- ❌ Hard-coded Home Assistant entity IDs
-- ❌ Alarm state management
-
-**Added:**
-- ✅ Three generic example pages (A, B, C)
-- ✅ Extensive comments and boilerplate examples
-- ✅ System diagnostics sensors (commented, ready to enable)
-- ✅ Clean customization workflow
-- ✅ Comprehensive documentation
-
-**Kept:**
-- ✅ All hardware capabilities exposed
-- ✅ Full Home Assistant integration
-- ✅ Production safety features
-- ✅ Optional clock page (commented example)
-- ✅ Optional voice assistant
-- ✅ Optional device info display
 
 ## 🐛 Troubleshooting
 
