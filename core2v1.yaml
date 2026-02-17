@@ -1,0 +1,925 @@
+# ================================================
+# M5Stack Core2 v1.0 - Fully Functional Template
+# ================================================
+# This is a BURN-IN READY example configuration for the M5Stack Core2 v1.0 device.
+# All hardware capabilities are exposed and functional out of the box.
+# Ready for customization - see comments throughout for examples.
+#
+# External Components:
+# - axp192_custom: Custom component for safe AXP192 power management
+#   See: external_components/axp192_custom/README.md for details
+#   Why needed: Provides safe backlight and vibration control with Core2 v1.0 safety features
+#
+# Customization Workflow:
+# 1. Change devicename and upper_devicename below
+# 2. Update WiFi credentials in secrets.yaml
+# 3. Edit Page A, B, C with your custom controls (uncomment EXAMPLE sections)
+# 4. Customize HA service calls to your entity_ids
+# 5. Uncomment optional features (clock page, voice assistant, device info page)
+# 6. Build and deploy: esphome run core2v1.yaml
+#
+# ================================================
+
+substitutions:
+  devicename: core2v1
+  upper_devicename: Core2 V1
+
+esphome:
+  name: ${devicename}
+  platformio_options:
+    upload_speed: 460800
+
+  # on_boot:
+  #   priority: -100
+  #   then:
+  #     - voice_assistant.start
+  #     - delay: 1s
+  #     # Quick vibration pattern - startup beep
+  #     - lambda: |-
+  #         id(axp192_custom_id).set_vibration(true);
+  #     - delay: 100ms
+  #     - lambda: |-
+  #         id(axp192_custom_id).set_vibration(false);
+  #     - delay: 100ms
+  #     - lambda: |-
+  #         id(axp192_custom_id).set_vibration(true);
+  #     - delay: 100ms
+  #     - lambda: |-
+  #         id(axp192_custom_id).set_vibration(false);
+
+external_components:
+  - source:
+      type: local
+      path: external_components
+
+esp32:
+  board: m5stack-core2
+  framework:
+    type: arduino
+
+psram:
+  mode: quad
+  speed: 80MHz
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+logger:
+  level: INFO
+
+api:
+
+ota:
+  - platform: esphome
+
+# ------------------------------------------------
+# AXP192 PMU
+# ------------------------------------------------
+axp192_custom:
+  id: axp192_custom_id
+  i2c_id: bus_a
+  address: 0x34
+
+# ------------------------------------------------
+# I2C Bus
+# ------------------------------------------------
+i2c:
+  id: bus_a
+  sda: GPIO21
+  scl: GPIO22
+  frequency: 400kHz
+  scan: false
+
+# ------------------------------------------------
+# Backlight Control (NEVER goes to 0 - Core2 v1.0 safety)
+# ------------------------------------------------
+output:
+  - platform: template
+    id: backlight_output
+    type: float
+    write_action:
+      - lambda: |-
+          // Core2 v1.0 CRITICAL: DCDC3 powers touch controller + backlight
+          // NEVER set to 0 or device becomes unresponsive!
+          const uint8_t MIN_BRIGHTNESS = 70;   // Dim but functional
+          const uint8_t MAX_BRIGHTNESS = 110;  // Full brightness
+          const uint8_t SAFETY_MINIMUM = 50;   // NEVER go below this
+          
+          uint8_t level;
+          if (state < 0.01f) {
+            // User wants "off" - use very dim instead
+            level = SAFETY_MINIMUM;
+            ESP_LOGW("backlight", "OFF requested - using minimum safe level %d instead", SAFETY_MINIMUM);
+          } else {
+            level = MIN_BRIGHTNESS + (state * (MAX_BRIGHTNESS - MIN_BRIGHTNESS));
+          }
+          
+          id(axp192_custom_id).set_backlight_level(level);
+          ESP_LOGD("backlight", "Brightness: %.0f%% -> level %d", state * 100.0f, level);
+
+# ------------------------------------------------
+# Backlight as Light Entity
+# ------------------------------------------------
+light:
+  - platform: monochromatic
+    id: backlight_light
+    name: "Backlight"
+    output: backlight_output
+    default_transition_length: 0.5s
+    restore_mode: RESTORE_DEFAULT_ON
+    # Core2 v1.0 note: "Off" = very dim, not actually off
+
+# ------------------------------------------------
+# OPTIONAL: Add a separate switch for "sleep mode" that dims to minimum
+# ------------------------------------------------
+switch:
+  - platform: template
+    id: sleep_mode
+    name: "Sleep Mode"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - light.turn_on:
+          id: backlight_light
+          brightness: 1%  # This will map to SAFETY_MINIMUM (50)
+    turn_off_action:
+      - light.turn_on:
+          id: backlight_light
+          brightness: 80%  # Nice and bright
+  - platform: template
+    name: "Vibration Motor"
+    id: vibration_motor
+    optimistic: true
+    turn_on_action:
+      - lambda: |-
+          id(axp192_custom_id).set_vibration(true);
+    turn_off_action:
+      - lambda: |-
+          id(axp192_custom_id).set_vibration(false);
+
+# ------------------------------------------------
+# IMU Sensor
+# ------------------------------------------------
+sensor:
+  - platform: mpu6886
+    address: 0x68
+    i2c_id: bus_a
+    update_interval: 5s
+    accel_x:
+      name: "Accel X"
+    accel_y:
+      name: "Accel Y"
+    accel_z:
+      name: "Accel Z"
+    gyro_x:
+      name: "Gyro X"
+    gyro_y:
+      name: "Gyro Y"
+    gyro_z:
+      name: "Gyro Z"
+    temperature:
+      name: "IMU Temperature"
+
+    # AXP192 Battery monitoring
+  - platform: template
+    name: "Battery Voltage"
+    id: battery_voltage
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    update_interval: 240s
+    lambda: |-
+      uint8_t msb = id(axp192_custom_id).read_reg(0x78);
+      uint8_t lsb = id(axp192_custom_id).read_reg(0x79);
+      uint16_t raw = (msb << 4) | (lsb & 0x0F);
+      return raw * 1.1 / 1000.0;
+
+  - platform: template
+    name: "Battery Percentage"
+    id: battery_percent
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: 240s
+    lambda: |-
+      float voltage = id(battery_voltage).state;
+      if (voltage < 3.2) return 0.0;
+      if (voltage > 4.2) return 100.0;
+      return (voltage - 3.2) / (4.2 - 3.2) * 100.0;
+
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    id: wifi_signal_sensor
+    update_interval: 30s
+
+  # ================================================
+  # OPTIONAL: System/ESP32 Internals (Commented)
+  # ================================================
+  # Uncomment any of these to expose to Home Assistant
+
+  # - platform: template
+  #   name: "CPU Temperature"
+  #   id: cpu_temperature
+  #   unit_of_measurement: "°C"
+  #   accuracy_decimals: 1
+  #   update_interval: 30s
+  #   lambda: |-
+  #     // ESP32 internal temperature sensor
+  #     return (temperatureRead() - 32) * 5/9;
+
+  # - platform: template
+  #   name: "Free Heap"
+  #   id: free_heap
+  #   unit_of_measurement: "bytes"
+  #   accuracy_decimals: 0
+  #   update_interval: 30s
+  #   lambda: |-
+  #     // Returns free memory in bytes
+  #     return (float)esp_get_free_heap_size();
+
+  # - platform: template
+  #   name: "WiFi Signal Strength %"
+  #   id: wifi_signal_percent
+  #   unit_of_measurement: "%"
+  #   accuracy_decimals: 0
+  #   update_interval: 30s
+  #   lambda: |-
+  #     // Convert dBm to percentage (0-100%)
+  #     float signal_dbm = id(wifi_signal_sensor).state;
+  #     int signal_percent = 0;
+  #     if (signal_dbm > -50) signal_percent = 100;
+  #     else if (signal_dbm > -60) signal_percent = 80;
+  #     else if (signal_dbm > -70) signal_percent = 60;
+  #     else if (signal_dbm > -80) signal_percent = 40;
+  #     else if (signal_dbm > -90) signal_percent = 20;
+  #     else signal_percent = 10;
+  #     return signal_percent;
+
+  # - platform: template
+  #   name: "Uptime"
+  #   id: uptime_sensor
+  #   unit_of_measurement: "s"
+  #   accuracy_decimals: 0
+  #   update_interval: 60s
+  #   lambda: |-
+  #     // Returns uptime in seconds
+  #     return (float)(millis() / 1000);
+
+  # - platform: template
+  #   name: "Display Brightness Level"
+  #   id: display_brightness_level
+  #   unit_of_measurement: "%"
+  #   accuracy_decimals: 0
+  #   update_interval: 10s
+  #   lambda: |-
+  #     // Reads back current brightness level (0-100%)
+  #     // Note: This is approximate based on last set value
+  #     return 50.0;  // TODO: Implement actual readback from AXP192
+
+# ------------------------------------------------
+# I2S Audio + Speaker
+# ------------------------------------------------
+i2s_audio:
+  id: bus_i2s
+  i2s_lrclk_pin: GPIO0
+  i2s_bclk_pin: GPIO12
+  
+media_player:
+  - platform: i2s_audio
+    id: media_player_i2s
+    name: Media Player
+    dac_type: external
+    i2s_dout_pin: GPIO2
+    mode: mono
+    
+# ================================================
+# OPTIONAL: Microphone (I2S) - Commented out
+# ================================================
+# Uncomment to enable microphone input
+# microphone:
+#   - platform: i2s_audio
+#     id: core2_mic
+#     adc_type: external
+#     i2s_din_pin: GPIO34
+#     channel: left
+#     sample_rate: 16000
+
+# ================================================
+# OPTIONAL: Voice Assistant - Commented out
+# ================================================
+# Uncomment to enable voice assistant integration with Home Assistant
+# Requires: Home Assistant conversation agent setup
+# voice_assistant:
+#   id: va
+#   microphone: core2_mic
+#   media_player: media_player_i2s
+#   noise_suppression_level: 2
+#   auto_gain: 0 dBFS
+#   volume_multiplier: 1.0
+
+# ------------------------------------------------
+# Time from Home Assistant
+# ------------------------------------------------
+time:
+  - platform: homeassistant
+    id: ha_time
+    # on_time events are commented out below - see clock_page for how to use
+    # If you uncomment the clock_page, uncomment the on_time sections as well
+
+    # on_time:
+    #   # Update clock display every second (example for clock_page)
+    #   - seconds: /1
+    #     then:
+    #       - lambda: |-
+    #           using esphome::media_player::MediaPlayerState;
+    #           if (id(media_player_i2s).state == MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING) {
+    #             return;
+    #           }
+    #           if (!id(ha_time).now().is_valid()) return;
+    #           auto t = id(ha_time).now();
+    #           int hour12 = t.hour % 12;
+    #           if (hour12 == 0) hour12 = 12;
+    #           const char *ampm = (t.hour < 12) ? "AM" : "PM";
+    #           char buffer[16];
+    #           sprintf(buffer, "%d:%02d %s", hour12, t.minute, ampm);
+    #           lv_label_set_text(id(clock_label), buffer);
+    #
+    #   # Update device info every 30 seconds (example for device_info_page)
+    #   - seconds: /30
+    #     then:
+    #       - if:
+    #           condition:
+    #             lvgl.is_paused:
+    #           then:
+    #             - logger.log: "LVGL paused, skipping update"
+    #           else:
+    #             - script.execute: update_device_info
+      
+# ------------------------------------------------
+# FONTS
+# ------------------------------------------------
+font:
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: 400
+    id: roboto_32
+    size: 70
+    bpp: 4
+
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: 400
+    id: roboto_small
+    size: 25
+    bpp: 4
+
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: 400
+    id: roboto_tiny
+    size: 16
+    bpp: 4
+
+  - file: "fonts/materialdesignicons-webfont.ttf"
+    id: mdi_48
+    size: 48
+    bpp: 4
+    glyphs:
+      - "\U000F0335"  # lightbulb
+      - "\U000F0210"  # fan
+      - "\U000F12CA"  # assistant icon
+      - "\U000F0515"  # bell
+      - "\U000F03FC"  # ?
+      - "\U000F02E3"  # ?
+      # for device info page:
+      - "\U000F05A9"  # wifi
+      - "\U000F0079"  # battery
+      - "\U000F0082"  # battery-medium
+      - "\U000F007B"  # battery-low
+      - "\U000F008E"  # battery-alert
+      - "\U000F089E"  # battery-charging
+      - "\U000F0484"  # ip-network
+      - "\U000F0954"  # clock-outline
+
+# ------------------------------------------------
+# SPI + Display
+# ------------------------------------------------
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO23
+
+display:
+  - platform: mipi_spi
+    model: M5CORE2
+    id: main_display
+    update_interval: 0s
+    auto_clear_enabled: false
+    dc_pin: GPIO15             # Add this line
+    #cs_pin: GPIO5            # Add if needed (common fix in issues)
+    #reset_pin: GPIO27        # Rarely needed, but try if still issues
+
+# ------------------------------------------------
+# Touchscreen
+# ------------------------------------------------
+touchscreen:
+  - platform: ft63x6
+    id: touch_screen
+    interrupt_pin: GPIO39
+    i2c_id: bus_a
+    on_touch:
+      - logger.log: "Screen touched"
+      - lambda: |-      
+          if (!touches.empty()) {
+            auto& tp = touches[0];
+            ESP_LOGI("touch", "x=%d y=%d", tp.x, tp.y);
+          }
+      - light.turn_on: backlight_light
+
+# ------------------------------------------------
+# Bezel Buttons (Physical touch areas)
+# ------------------------------------------------
+binary_sensor:
+  - platform: touchscreen
+    id: btn_a
+    x_min: 10
+    x_max: 120
+    y_min: 240
+    y_max: 280
+    use_raw: true
+    on_press:
+      - lvgl.page.show: page_a
+
+  - platform: touchscreen
+    id: btn_b
+    x_min: 130
+    x_max: 200
+    y_min: 240
+    y_max: 280
+    use_raw: true
+    on_press:
+      - lvgl.page.show: page_b
+
+  - platform: touchscreen
+    id: btn_c
+    x_min: 230
+    x_max: 310
+    y_min: 240
+    y_max: 280
+    use_raw: true
+    on_press:
+      - lvgl.page.show: page_c
+
+  - platform: template
+    name: "Charging"
+    id: charging_status
+    lambda: |-
+      uint8_t status = id(axp192_custom_id).read_reg(0x01);
+      return (status & 0x40);  // bit 6 = charging
+
+# ------------------------------------------------
+# LVGL UI
+# ------------------------------------------------
+lvgl:
+  touchscreens:
+    - touchscreen_id: touch_screen
+
+  # on_idle:
+  #   - timeout: 60s
+  #     then:
+  #       - lvgl.page.show: page_a
+
+  pages:
+
+    # ================================================
+    # PAGE A - Generic Example Page
+    # ================================================
+    - id: page_a
+      width: 320
+      height: 240
+      bg_color: 0x1A1A1A
+      layout:
+        type: FLEX
+        flex_flow: COLUMN
+        flex_align_main: CENTER
+        flex_align_cross: CENTER
+      widgets:
+        - label:
+            width: 320
+            height: 240
+            text: "Page A"
+            text_font: roboto_32
+            text_color: 0xFFFFFF
+            text_align: CENTER
+
+        # ================================================
+        # EXAMPLE: Add controls for Page A below
+        # ================================================
+        # Example 1: Light toggle button
+        # - obj:
+        #     width: 140
+        #     height: 60
+        #     radius: 12
+        #     clickable: true
+        #     bg_color: 0xFF80AB
+        #     on_press:
+        #       - homeassistant.service:
+        #           service: light.toggle
+        #           data:
+        #             entity_id: light.YOUR_LIGHT_ENTITY_ID
+        #     widgets:
+        #       - label:
+        #           text: "Light"
+        #           text_color: 0xFFFFFF
+        #           text_align: CENTER
+        #           width: 140
+        #           height: 60
+
+    # ================================================
+    # PAGE B - Generic Example Page
+    # ================================================
+    - id: page_b
+      width: 320
+      height: 240
+      bg_color: 0x1A1A1A
+      layout:
+        type: FLEX
+        flex_flow: COLUMN
+        flex_align_main: CENTER
+        flex_align_cross: CENTER
+      widgets:
+        - label:
+            width: 320
+            height: 240
+            text: "Page B"
+            text_font: roboto_32
+            text_color: 0xFFFFFF
+            text_align: CENTER
+
+        # ================================================
+        # EXAMPLE: Add controls for Page B below
+        # ================================================
+        # Example 2: Fan toggle button
+        # - obj:
+        #     width: 140
+        #     height: 60
+        #     radius: 12
+        #     clickable: true
+        #     bg_color: 0x50A0FF
+        #     on_press:
+        #       - homeassistant.service:
+        #           service: fan.toggle
+        #           data:
+        #             entity_id: fan.YOUR_FAN_ENTITY_ID
+        #     widgets:
+        #       - label:
+        #           text: "Fan"
+        #           text_color: 0xFFFFFF
+        #           text_align: CENTER
+        #           width: 140
+        #           height: 60
+
+    # ================================================
+    # PAGE C - Generic Example Page
+    # ================================================
+    - id: page_c
+      width: 320
+      height: 240
+      bg_color: 0x1A1A1A
+      layout:
+        type: FLEX
+        flex_flow: COLUMN
+        flex_align_main: CENTER
+        flex_align_cross: CENTER
+      widgets:
+        - label:
+            width: 320
+            height: 240
+            text: "Page C"
+            text_font: roboto_32
+            text_color: 0xFFFFFF
+            text_align: CENTER
+
+        # ================================================
+        # EXAMPLE: Add controls for Page C below
+        # ================================================
+        # Example 3: Custom sensor display
+        # - label:
+        #     text: "Temp: --°C"
+        #     text_font: roboto_small
+        #     text_color: 0xFFFFFF
+        #     text_align: CENTER
+
+    # ================================================
+    # DEVICE INFO PAGE - Commented Example
+    # ================================================
+    # Uncomment the entire section below to enable the device info page
+    # To navigate to it, add to bezel button or on_idle:
+    #   - lvgl.page.show: device_info_page
+    # And uncomment the update_device_info script calls in time on_time events
+    #
+    # - id: device_info_page
+    #   width: 320
+    #   height: 240
+    #   bg_color: 0x000000
+    #   pad_all: 8
+    #   scrollable: false
+    #   widgets:
+    #
+    #     # WiFi Section
+    #     - obj:
+    #         x: 5
+    #         y: 5
+    #         width: 148
+    #         height: 100
+    #         bg_color: 0x1A1A1A
+    #         radius: 8
+    #         pad_all: 6
+    #         scrollable: false
+    #         widgets:
+    #           - label:
+    #               x: 5
+    #               y: 5
+    #               text: "\U000F05A9"
+    #               text_font: mdi_48
+    #               text_color: 0x50A0FF
+    #           - bar:
+    #               id: wifi_bar
+    #               x: 60
+    #               y: 12
+    #               width: 78
+    #               height: 10
+    #               value: 0
+    #               min_value: 0
+    #               max_value: 100
+    #               bg_color: 0x404040
+    #               indicator:
+    #                 bg_color: 0x50A0FF
+    #           - label:
+    #               id: wifi_signal_label
+    #               x: 60
+    #               y: 28
+    #               text: "-- dBm"
+    #               text_font: roboto_tiny
+    #               text_color: 0xAAAAAA
+    #           - label:
+    #               id: wifi_ssid_label
+    #               x: 5
+    #               y: 65
+    #               text: "Not connected"
+    #               text_font: roboto_tiny
+    #               text_color: 0xAAAAAA
+    #
+    #     # Battery Section
+    #     - obj:
+    #         x: 165
+    #         y: 5
+    #         width: 148
+    #         height: 100
+    #         bg_color: 0x1A1A1A
+    #         radius: 8
+    #         pad_all: 6
+    #         scrollable: false
+    #         widgets:
+    #           - label:
+    #               id: battery_icon
+    #               x: 5
+    #               y: 5
+    #               text: "\U000F0079"
+    #               text_font: mdi_48
+    #               text_color: 0x4CAF50
+    #           - bar:
+    #               id: battery_bar
+    #               x: 60
+    #               y: 12
+    #               width: 78
+    #               height: 10
+    #               value: 0
+    #               min_value: 0
+    #               max_value: 100
+    #               bg_color: 0x404040
+    #               indicator:
+    #                 bg_color: 0x4CAF50
+    #           - label:
+    #               id: battery_percent_label
+    #               x: 60
+    #               y: 28
+    #               text: "0%"
+    #               text_font: roboto_tiny
+    #               text_color: 0xAAAAAA
+    #           - label:
+    #               id: battery_voltage_label
+    #               x: 5
+    #               y: 65
+    #               text: "0.00V"
+    #               text_font: roboto_tiny
+    #               text_color: 0xAAAAAA
+    #
+    #     # IP Address Section
+    #     - obj:
+    #         x: 5
+    #         y: 115
+    #         width: 308
+    #         height: 50
+    #         bg_color: 0x1A1A1A
+    #         radius: 8
+    #         pad_all: 4
+    #         scrollable: false
+    #         widgets:
+    #           - label:
+    #               x: 5
+    #               y: 8
+    #               text: "\U000F0484"
+    #               text_font: mdi_48
+    #               text_color: 0xFFAB00
+    #           - label:
+    #               id: ip_address_label
+    #               x: 60
+    #               y: 11
+    #               text: "0.0.0.0"
+    #               text_font: roboto_tiny
+    #               text_color: 0xAAAAAA
+    #
+    #     # Uptime Section
+    #     - obj:
+    #         x: 5
+    #         y: 175
+    #         width: 308
+    #         height: 50
+    #         bg_color: 0x1A1A1A
+    #         radius: 8
+    #         pad_all: 4
+    #         scrollable: false
+    #         widgets:
+    #           - label:
+    #               x: 5
+    #               y: 8
+    #               text: "\U000F0954"
+    #               text_font: mdi_48
+    #               text_color: 0xAA78FF
+    #           - label:
+    #               id: uptime_label
+    #               x: 60
+    #               y: 11
+    #               text: "Uptime: 0d 0h 0m"
+    #               text_font: roboto_tiny
+    #               text_color: 0xAAAAAA
+
+    # ================================================
+    # CLOCK PAGE - Commented Example
+    # ================================================
+    # To use the clock page, uncomment below and also:
+    # 1. Uncomment the time on_time events in the "Time from Home Assistant" section
+    # 2. Uncomment on_idle in LVGL section to show clock on idle
+    # 3. Uncomment update_device_info script if using device_info_page
+    #
+    # - id: clock_page
+    #   width: 320
+    #   height: 240
+    #   bg_color: 0x000000
+    #   layout:
+    #     type: FLEX
+    #     flex_flow: COLUMN
+    #     flex_align_main: CENTER
+    #     flex_align_cross: CENTER
+    #   widgets:
+    #     - label:
+    #         id: clock_label
+    #         width: 320
+    #         text: "Starting..."
+    #         text_font: roboto_32
+    #         text_color: 0xFFFFFF
+    #         text_align: CENTER
+
+# ================================================
+# HA Buttons - Home Assistant Service Examples
+# ================================================
+# These are referenced by the LVGL page buttons.
+# Uncomment and customize the entity_ids to match your Home Assistant setup.
+
+button:
+  # - platform: template
+  #   name: "Light Toggle"
+  #   id: btn_light_1
+  #   on_press:
+  #     - homeassistant.service:
+  #         service: light.toggle
+  #         data:
+  #           entity_id: light.YOUR_LIGHT_ENTITY_ID
+
+  # - platform: template
+  #   name: "Fan Toggle"
+  #   id: btn_fan_1
+  #   on_press:
+  #     - homeassistant.service:
+  #         service: fan.toggle
+  #         data:
+  #           entity_id: fan.YOUR_FAN_ENTITY_ID
+
+  # - platform: template
+  #   name: "Switch Toggle"
+  #   id: btn_switch_1
+  #   on_press:
+  #     - homeassistant.service:
+  #         service: switch.toggle
+  #         data:
+  #           entity_id: switch.YOUR_SWITCH_ENTITY_ID
+
+  # - platform: template
+  #   name: "Voice Assist"
+  #   id: btn_voice_assist
+  #   on_press:
+  #     - voice_assistant.start:
+
+# ================================================
+# Text Sensors
+# ================================================
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+      id: ip_address
+    ssid:
+      name: "WiFi SSID"
+      id: wifi_ssid
+
+# ================================================
+# Globals (Add custom globals here if needed)
+# ================================================
+# globals:
+#   - id: my_custom_variable
+#     type: int
+#     initial_value: '0'
+
+# ================================================
+# Scripts
+# ================================================
+# Uncomment update_device_info below to use with device_info_page
+script:
+
+  # - id: update_device_info
+  #   mode: restart
+  #   then:
+  #     - lambda: |-
+  #         // Update WiFi info
+  #         float signal_dbm = id(wifi_signal_sensor).state;
+  #         int signal_percent = 0;
+  #         if (signal_dbm > -50) signal_percent = 100;
+  #         else if (signal_dbm > -60) signal_percent = 80;
+  #         else if (signal_dbm > -70) signal_percent = 60;
+  #         else if (signal_dbm > -80) signal_percent = 40;
+  #         else if (signal_dbm > -90) signal_percent = 20;
+  #         else signal_percent = 10;
+  #
+  #         lv_bar_set_value(id(wifi_bar), signal_percent, LV_ANIM_OFF);
+  #
+  #         char wifi_buf[16];
+  #         sprintf(wifi_buf, "%.0f dBm", signal_dbm);
+  #         lv_label_set_text(id(wifi_signal_label), wifi_buf);
+  #
+  #         lv_label_set_text(id(wifi_ssid_label), id(wifi_ssid).state.c_str());
+  #
+  #         // Update battery info
+  #         float bat_percent = id(battery_percent).state;
+  #         lv_bar_set_value(id(battery_bar), (int)bat_percent, LV_ANIM_OFF);
+  #
+  #         char bat_buf[16];
+  #         sprintf(bat_buf, "%.0f%%", bat_percent);
+  #         lv_label_set_text(id(battery_percent_label), bat_buf);
+  #
+  #         char volt_buf[32];
+  #         if (id(charging_status).state) {
+  #           sprintf(volt_buf, "%.2fV (Charging)", id(battery_voltage).state);
+  #           lv_label_set_text(id(battery_icon), "\U000F089E");
+  #           lv_obj_set_style_text_color(id(battery_icon), lv_color_hex(0xFFAB00), 0);
+  #         } else {
+  #           sprintf(volt_buf, "%.2fV", id(battery_voltage).state);
+  #           if (bat_percent > 80) {
+  #             lv_label_set_text(id(battery_icon), "\U000F0079");
+  #             lv_obj_set_style_text_color(id(battery_icon), lv_color_hex(0x4CAF50), 0);
+  #           } else if (bat_percent > 50) {
+  #             lv_label_set_text(id(battery_icon), "\U000F0082");
+  #             lv_obj_set_style_text_color(id(battery_icon), lv_color_hex(0xFFAB00), 0);
+  #           } else if (bat_percent > 20) {
+  #             lv_label_set_text(id(battery_icon), "\U000F007B");
+  #             lv_obj_set_style_text_color(id(battery_icon), lv_color_hex(0xFF9800), 0);
+  #           } else {
+  #             lv_label_set_text(id(battery_icon), "\U000F008E");
+  #             lv_obj_set_style_text_color(id(battery_icon), lv_color_hex(0xFF0000), 0);
+  #           }
+  #         }
+  #         lv_label_set_text(id(battery_voltage_label), volt_buf);
+  #
+  #         // Update IP address
+  #         lv_label_set_text(id(ip_address_label), id(ip_address).state.c_str());
+  #
+  #         // Update uptime
+  #         unsigned long uptime_sec = millis() / 1000;
+  #         unsigned long days = uptime_sec / 86400;
+  #         unsigned long hours = (uptime_sec % 86400) / 3600;
+  #         unsigned long minutes = (uptime_sec % 3600) / 60;
+  #
+  #         char uptime_buf[32];
+  #         sprintf(uptime_buf, "Uptime: %lud %luh %lum", days, hours, minutes);
+  #         lv_label_set_text(id(uptime_label), uptime_buf);
